@@ -381,7 +381,7 @@ fn rank_hand(state: &State, private_cards: (Card, Card), public_cards: &Vec<Card
     min_rank
 }
 
-fn rank_card_combination(cards: Vec<Card>) -> (u64, u64, u64) {
+pub(crate) fn rank_card_combination(cards: Vec<Card>) -> (u64, u64, u64) {
     let mut ordered_cards = cards.clone();
     ordered_cards.sort_by_key(|c| c.rank);
     let suits: Vec<CardSuit> = ordered_cards.iter().map(|c| c.suit).collect();
