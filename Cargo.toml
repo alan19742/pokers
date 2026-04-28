@@ -6,10 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "pokers"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = "0.18.3"
+pyo3 = { version = "0.18.3", features = ["extension-module"] }
 rand = "0.8.4"
 strum = "0.24"
 strum_macros = "0.24"
@@ -19,3 +19,4 @@ itertools = "0.10.5"
 [dev-dependencies]
 proptest = "1.2.0"
 proptest-derive = "0.3.0"
+
