@@ -67,6 +67,76 @@ def legal_action_indices(state):
     return [action_to_idx(a) for a in state.legal_actions]
 
 
+def coerce_to_bonus_action(action, state=None):
+    """Best-effort conversion of any 'action-ish' object to BonusActionEnum.
+
+    Accepts:
+      - pkrs.BonusActionEnum (returned as-is)
+      - int index in [0..3]
+      - pkrs.Action / pkrs.ActionEnum from the multi-player NLHE API
+        (mapped by variant name, with NLHE's 'Raise' -> 'Bet' since BonusState
+        has a fixed-size raise)
+      - Anything with an `.action` or `.action_enum` attribute
+      - A string like "Fold" / "BonusActionEnum.Fold"
+
+    If `state` is given, the result is clamped to the legal action set: when
+    the requested action is illegal, we fall back to the first legal action
+    (Check > Call-equivalent, otherwise the lowest-index legal action).
+    """
+    # Already the right type
+    if isinstance(action, pkrs.BonusActionEnum):
+        result = action
+    # Plain integer index
+    elif isinstance(action, (int, np.integer)):
+        result = index_to_bonus_action(int(action))
+    else:
+        # Try to extract a name string
+        name = None
+        # pkrs.Action has `.action` (an ActionEnum); ActionEnum has no attrs
+        for attr in ("action", "action_enum"):
+            if hasattr(action, attr):
+                inner = getattr(action, attr)
+                name = _action_name(inner)
+                break
+        if name is None:
+            name = _action_name(action)
+
+        # NLHE -> Bonus name mapping (Raise / Call have no direct Bonus twin)
+        nlhe_to_bonus = {
+            "Fold": "Fold",
+            "Check": "Check",
+            "Call": "Bet",   # Call doesn't exist in Bonus; Bet is the closest
+            "Raise": "Bet",  # Bonus uses fixed Bet sizing
+            "Play": "Play",
+            "Bet": "Bet",
+        }
+        mapped = nlhe_to_bonus.get(name, name)
+        if mapped not in _NAME_TO_INDEX:
+            raise TypeError(
+                f"Cannot coerce {action!r} (name={name!r}) to BonusActionEnum"
+            )
+        result = ACTION_LIST[_NAME_TO_INDEX[mapped]]
+
+    # Clamp to legal set if state provided
+    if state is not None and result not in state.legal_actions:
+        legal = list(state.legal_actions)
+        if not legal:
+            return result
+        # Prefer Check > Fold > Play > Bet ordering when remapping
+        preference = [
+            pkrs.BonusActionEnum.Check,
+            pkrs.BonusActionEnum.Fold,
+            pkrs.BonusActionEnum.Play,
+            pkrs.BonusActionEnum.Bet,
+        ]
+        for pref in preference:
+            if pref in legal:
+                return pref
+        return legal[0]
+
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Environment factory                                                         #
 # --------------------------------------------------------------------------- #
@@ -102,7 +172,8 @@ def evaluate_against_dealer(agent, num_games=500,
             )
 
             while not state.final_state:
-                action = agent.choose_action(state)
+                raw_action = agent.choose_action(state)
+                action = coerce_to_bonus_action(raw_action, state=state)
 
                 new_state = state.apply_action(action)
                 if new_state.status != pkrs.BonusStatus.Ok:
