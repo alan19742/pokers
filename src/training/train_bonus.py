@@ -26,29 +26,45 @@ from src.utils.settings import STRICT_CHECKING, set_strict_checking
 
 
 # --------------------------------------------------------------------------- #
-# Action mapping                                                              #
+# Action mapping (Solution A: integer-indexed, no enum dict keys)             #
 # --------------------------------------------------------------------------- #
-# We expose 4 discrete action indices to the network. The agent (DeepCFRAgent)
-# is expected to be configured with num_actions=4 and to implement
-# `action_type_to_bonus_action` mirroring the original
-# `action_type_to_pokers_action` but returning a `pkrs.BonusActionEnum`.
-ACTION_INDEX = {
-    pkrs.BonusActionEnum.Fold: 0,
-    pkrs.BonusActionEnum.Play: 1,
-    pkrs.BonusActionEnum.Check: 2,
-    pkrs.BonusActionEnum.Bet: 3,
-}
+# `pkrs.BonusActionEnum` is not hashable in Python (PyO3 0.18 does not auto-
+# generate __hash__ for pyclass enums). To avoid touching bonus.rs, we use a
+# parallel list and map enum <-> index by name string. The order of ACTION_LIST
+# defines the canonical action index used by the network (num_actions=4).
+ACTION_LIST = [
+    pkrs.BonusActionEnum.Fold,   # 0
+    pkrs.BonusActionEnum.Play,   # 1
+    pkrs.BonusActionEnum.Check,  # 2
+    pkrs.BonusActionEnum.Bet,    # 3
+]
+ACTION_NAMES = ["Fold", "Play", "Check", "Bet"]
+_NAME_TO_INDEX = {name: i for i, name in enumerate(ACTION_NAMES)}
 
-INDEX_ACTION = {v: k for k, v in ACTION_INDEX.items()}
+
+def _action_name(action):
+    """Extract the variant name from a BonusActionEnum value.
+
+    Works regardless of whether `str(action)` returns "BonusActionEnum.Fold"
+    or just "Fold" across pyo3 versions.
+    """
+    s = str(action)
+    return s.rsplit(".", 1)[-1]
+
+
+def action_to_idx(action):
+    """Map a pkrs.BonusActionEnum to its canonical integer index."""
+    return _NAME_TO_INDEX[_action_name(action)]
+
+
+def index_to_bonus_action(action_idx):
+    """Map an integer index back to a pkrs.BonusActionEnum."""
+    return ACTION_LIST[action_idx]
 
 
 def legal_action_indices(state):
     """Return the list of legal action indices for the current BonusState."""
-    return [ACTION_INDEX[a] for a in state.legal_actions]
-
-
-def index_to_bonus_action(action_idx):
-    return INDEX_ACTION[action_idx]
+    return [action_to_idx(a) for a in state.legal_actions]
 
 
 # --------------------------------------------------------------------------- #
