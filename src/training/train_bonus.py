@@ -20,9 +20,119 @@ import pokers as pkrs
 import torch
 
 from src.core.deep_cfr import DeepCFRAgent
-from src.core.model import encode_state, set_verbose
+# NOTE: We deliberately do NOT import encode_state from src.core.model because
+# that encoder reads `state.players_state[i]` which does not exist on
+# pkrs.BonusState. We provide a Bonus-specific encoder below.
+from src.core.model import set_verbose
 from src.utils.logging import log_game_error
 from src.utils.settings import STRICT_CHECKING, set_strict_checking
+
+
+# --------------------------------------------------------------------------- #
+# Bonus-specific state encoder (drop-in replacement for encode_state)         #
+# --------------------------------------------------------------------------- #
+BONUS_STATE_DIM = 5 + 2 * 17 + 5 * 18 + 5 + 4  # 5 + 34 + 90 + 5 + 4 = 138
+
+
+def _encode_card(card, dealt=True):
+    """Return a length-17 vector: [dealt_flag(1), suit one-hot(4), rank one-hot(13)]."""
+    vec = np.zeros(18, dtype=np.float32)
+    vec[0] = 1.0 if dealt else 0.0
+    if dealt:
+        vec[1 + int(card.suit)] = 1.0
+        vec[5 + int(card.rank)] = 1.0
+    return vec
+
+
+def _encode_hand_card(card):
+    """Hole cards are always dealt; we drop the dealt flag (length-17)."""
+    vec = np.zeros(17, dtype=np.float32)
+    vec[int(card.suit)] = 1.0
+    vec[4 + int(card.rank)] = 1.0
+    return vec
+
+
+def bonus_encode_state(state):
+    """Encode a pkrs.BonusState into a fixed-length float32 vector.
+
+    Layout (138 dims):
+        [0:5]     stage one-hot (Preflop / Flop / Turn / River / Showdown)
+        [5:39]    player hand: 2 cards x (4 suit + 13 rank)
+        [39:129]  public cards: 5 cards x (1 dealt-flag + 4 suit + 13 rank)
+        [129:134] normalized bets: ante / flop / turn / river / stake_left
+        [134:138] legal action mask: Fold / Play / Check / Bet
+    """
+    # Stage one-hot
+    stage_oh = np.zeros(5, dtype=np.float32)
+    try:
+        stage_idx = int(state.stage) if not isinstance(state.stage, int) \
+            else state.stage
+    except (TypeError, ValueError):
+        stage_idx = {"Preflop": 0, "Flop": 1, "Turn": 2,
+                     "River": 3, "Showdown": 4}[_action_name(state.stage)]
+    stage_oh[min(stage_idx, 4)] = 1.0
+
+    # Hole cards
+    p1, p2 = state.player_hand
+    hand = np.concatenate([_encode_hand_card(p1), _encode_hand_card(p2)])
+
+    # Public cards (pad to 5)
+    public_parts = []
+    for i in range(5):
+        if i < len(state.public_cards):
+            public_parts.append(_encode_card(state.public_cards[i], dealt=True))
+        else:
+            public_parts.append(_encode_card(None, dealt=False))
+    public = np.concatenate(public_parts)
+
+    # Bet normalization (use ante as the unit; stake-left scaled by 1000)
+    unit = max(state.ante, 1e-6)
+    bets = np.array([
+        state.ante / unit,                     # always 1.0 by construction
+        state.flop_bet / unit,
+        state.turn_bet / unit,
+        state.river_bet / unit,
+        state.stake / 1000.0,
+    ], dtype=np.float32)
+
+    # Legal action mask (length 4)
+    mask = np.zeros(4, dtype=np.float32)
+    for a in state.legal_actions:
+        mask[action_to_idx(a)] = 1.0
+
+    return np.concatenate([stage_oh, hand, public, bets, mask])
+
+
+def bonus_choose_action(agent, state):
+    """Forward pass through the agent's advantage_net to pick a legal action.
+
+    Replaces `agent.choose_action(state)` (which reads `state.players_state`).
+    Returns a pkrs.BonusActionEnum.
+    """
+    legal = legal_action_indices(state)
+    if not legal:
+        # No legal action -> arbitrary; the caller will hit final_state next.
+        return ACTION_LIST[0]
+
+    encoded = bonus_encode_state(state)
+    state_tensor = torch.FloatTensor(encoded).to(agent.device)
+    with torch.no_grad():
+        advantages = agent.advantage_net(state_tensor.unsqueeze(0))
+        if isinstance(advantages, tuple):
+            advantages = advantages[0]
+        advantages = advantages[0].cpu().numpy()
+
+    # Mask illegal actions, take max regret-positive action; ties broken by index
+    masked = np.full(agent.num_actions, -np.inf, dtype=np.float32)
+    for idx in legal:
+        masked[idx] = max(advantages[idx], 0.0)
+
+    if np.all(np.isneginf(masked)) or np.nanmax(masked) <= 0.0:
+        # Uniform over legal actions when no positive advantage
+        choice_idx = random.choice(legal)
+    else:
+        choice_idx = int(np.argmax(masked))
+    return index_to_bonus_action(choice_idx)
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +282,8 @@ def evaluate_against_dealer(agent, num_games=500,
             )
 
             while not state.final_state:
-                raw_action = agent.choose_action(state)
+                # Use Bonus-specific decision function (avoids players_state access)
+                raw_action = bonus_choose_action(agent, state)
                 action = coerce_to_bonus_action(raw_action, state=state)
 
                 new_state = state.apply_action(action)
@@ -238,7 +349,7 @@ def _bonus_cfr_traverse(agent, state, iteration, depth=0, verbose=False):
     # --------------------------------------------------------------- #
     # Forward pass: predict advantages for current state              #
     # --------------------------------------------------------------- #
-    encoded_state = encode_state(state)
+    encoded_state = bonus_encode_state(state)
     state_tensor = torch.FloatTensor(encoded_state).to(agent.device)
 
     with torch.no_grad():
