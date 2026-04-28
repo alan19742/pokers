@@ -129,6 +129,7 @@ pub struct BonusState {
 // Init
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct InitBonusError {
     msg: String,
 }
