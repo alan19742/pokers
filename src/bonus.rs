@@ -49,7 +49,7 @@ use crate::state::stage::Stage;
 // ---------------------------------------------------------------------------
 
 #[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
 pub enum BonusActionEnum {
     Fold,  // Preflop only
     Play,  // Preflop only -> commits 2 * ante
@@ -57,11 +57,57 @@ pub enum BonusActionEnum {
     Bet,   // Flop / Turn -> commits 1 * ante
 }
 
+#[pymethods]
+impl BonusActionEnum {
+    /// Make the enum hashable in Python so it can be used as a dict key.
+    fn __hash__(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        (*self as u8).hash(&mut h);
+        h.finish()
+    }
+
+    /// Equality / ordering for Python (only Eq / Ne are meaningful).
+    fn __richcmp__(&self, other: &BonusActionEnum, op: pyo3::basic::CompareOp) -> PyResult<bool> {
+        use pyo3::basic::CompareOp::*;
+        match op {
+            Eq => Ok(self == other),
+            Ne => Ok(self != other),
+            _ => Err(pyo3::exceptions::PyTypeError::new_err(
+                "BonusActionEnum only supports == and !=",
+            )),
+        }
+    }
+}
+
 #[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BonusStatus {
     Ok,
     IllegalAction,
+}
+
+#[pymethods]
+impl BonusStatus {
+    fn __hash__(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        (*self as u8).hash(&mut h);
+        h.finish()
+    }
+
+    fn __richcmp__(&self, other: &BonusStatus, op: pyo3::basic::CompareOp) -> PyResult<bool> {
+        use pyo3::basic::CompareOp::*;
+        match op {
+            Eq => Ok(self == other),
+            Ne => Ok(self != other),
+            _ => Err(pyo3::exceptions::PyTypeError::new_err(
+                "BonusStatus only supports == and !=",
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
