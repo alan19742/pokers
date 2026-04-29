@@ -35,7 +35,19 @@ ACTION_INDEX_TO_ENUM = {
     2: pkrs.BonusActionEnum.Check,
     3: pkrs.BonusActionEnum.Bet,
 }
-ACTION_ENUM_TO_INDEX = {v: k for k, v in ACTION_INDEX_TO_ENUM.items()}
+
+
+def action_enum_to_index(action):
+    """Convert a BonusActionEnum to its integer index.
+
+    pyo3 enums are not hashable in Python, so we cannot use a reverse dict.
+    We rely on `==` equality (which pyo3 implements) and linear scan over 4
+    actions, which is negligible overhead.
+    """
+    for idx, enum_val in ACTION_INDEX_TO_ENUM.items():
+        if action == enum_val:
+            return idx
+    raise ValueError(f"Unknown BonusActionEnum: {action}")
 
 # State encoding:
 #   stage one-hot         : 5
@@ -100,7 +112,7 @@ def encode_bonus_state(state, initial_stake):
 
 def get_legal_action_indices(state):
     legal = state.legal_actions
-    return [ACTION_ENUM_TO_INDEX[a] for a in legal]
+    return [action_enum_to_index(a) for a in legal]
 
 
 # ---------------------------------------------------------------------------
