@@ -38,7 +38,6 @@ use itertools::Itertools;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use rand::{seq::SliceRandom, SeedableRng};
-use strum_macros::EnumIter;
 
 use crate::game_logic::rank_card_combination;
 use crate::state::card::{Card, CardRank};
@@ -48,65 +47,161 @@ use crate::state::stage::Stage;
 // Action / status enums
 // ---------------------------------------------------------------------------
 
+// Internal Rust enum (NOT exposed to Python) used for ergonomic pattern
+// matching inside `apply_action` and tests. The Python-facing type is the
+// `BonusActionEnum` struct below, which wraps this and is hashable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum BonusAction {
+    Fold = 0,
+    Play = 1,
+    Check = 2,
+    Bet = 3,
+}
+
+/// Python-facing action type. Implemented as a struct (not a fieldless enum)
+/// because pyo3 0.18 does not honor `__hash__` defined in `#[pymethods]` on
+/// enum pyclasses, which makes them unhashable on the Python side and breaks
+/// `set(state.legal_actions)` / dict-key usage in RL training scripts.
+///
+/// On the Python side, the four variants are exposed as class attributes
+/// (`BonusActionEnum.Fold`, ...), so user code is unchanged.
 #[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
-pub enum BonusActionEnum {
-    Fold,  // Preflop only
-    Play,  // Preflop only -> commits 2 * ante
-    Check, // Flop / Turn
-    Bet,   // Flop / Turn -> commits 1 * ante
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BonusActionEnum {
+    pub(crate) inner: BonusAction,
+}
+
+impl BonusActionEnum {
+    pub const FOLD: Self = Self { inner: BonusAction::Fold };
+    pub const PLAY: Self = Self { inner: BonusAction::Play };
+    pub const CHECK: Self = Self { inner: BonusAction::Check };
+    pub const BET: Self = Self { inner: BonusAction::Bet };
 }
 
 #[pymethods]
 impl BonusActionEnum {
-    /// Make the enum hashable in Python so it can be used as a dict key.
-    fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        (*self as u8).hash(&mut h);
-        h.finish()
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Fold() -> Self {
+        Self::FOLD
     }
 
-    /// Equality / ordering for Python (only Eq / Ne are meaningful).
-    fn __richcmp__(&self, other: &BonusActionEnum, op: pyo3::basic::CompareOp) -> PyResult<bool> {
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Play() -> Self {
+        Self::PLAY
+    }
+
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Check() -> Self {
+        Self::CHECK
+    }
+
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Bet() -> Self {
+        Self::BET
+    }
+
+    /// Hashable in Python so it can be used in sets / dict keys.
+    fn __hash__(&self) -> u64 {
+        self.inner as u64
+    }
+
+    /// Equality semantics for Python (only Eq / Ne are meaningful).
+    fn __richcmp__(
+        &self,
+        other: &BonusActionEnum,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<bool> {
         use pyo3::basic::CompareOp::*;
         match op {
-            Eq => Ok(self == other),
-            Ne => Ok(self != other),
+            Eq => Ok(self.inner == other.inner),
+            Ne => Ok(self.inner != other.inner),
             _ => Err(pyo3::exceptions::PyTypeError::new_err(
                 "BonusActionEnum only supports == and !=",
             )),
         }
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner {
+            BonusAction::Fold => "BonusActionEnum.Fold".into(),
+            BonusAction::Play => "BonusActionEnum.Play".into(),
+            BonusAction::Check => "BonusActionEnum.Check".into(),
+            BonusAction::Bet => "BonusActionEnum.Bet".into(),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+}
+
+// Same enum -> struct conversion for `BonusStatus` so it is also hashable
+// (consistency, and enables `set(states.status for ...)` style patterns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum BonusStatusInner {
+    Ok = 0,
+    IllegalAction = 1,
 }
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BonusStatus {
-    Ok,
-    IllegalAction,
+pub struct BonusStatus {
+    pub(crate) inner: BonusStatusInner,
+}
+
+impl BonusStatus {
+    pub const OK: Self = Self { inner: BonusStatusInner::Ok };
+    pub const ILLEGAL_ACTION: Self = Self { inner: BonusStatusInner::IllegalAction };
 }
 
 #[pymethods]
 impl BonusStatus {
-    fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        (*self as u8).hash(&mut h);
-        h.finish()
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Ok() -> Self {
+        Self::OK
     }
 
-    fn __richcmp__(&self, other: &BonusStatus, op: pyo3::basic::CompareOp) -> PyResult<bool> {
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn IllegalAction() -> Self {
+        Self::ILLEGAL_ACTION
+    }
+
+    fn __hash__(&self) -> u64 {
+        self.inner as u64
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &BonusStatus,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<bool> {
         use pyo3::basic::CompareOp::*;
         match op {
-            Eq => Ok(self == other),
-            Ne => Ok(self != other),
+            Eq => Ok(self.inner == other.inner),
+            Ne => Ok(self.inner != other.inner),
             _ => Err(pyo3::exceptions::PyTypeError::new_err(
                 "BonusStatus only supports == and !=",
             )),
         }
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner {
+            BonusStatusInner::Ok => "BonusStatus.Ok".into(),
+            BonusStatusInner::IllegalAction => "BonusStatus.IllegalAction".into(),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
     }
 }
 
@@ -256,7 +351,7 @@ impl BonusState {
             reward: 0.0,
             legal_actions: Vec::new(),
             final_state: false,
-            status: BonusStatus::Ok,
+            status: BonusStatus::OK,
             from_action: None,
             dealer_revealed: false,
         };
@@ -268,7 +363,7 @@ impl BonusState {
     /// The receiver is left untouched (immutable transitions).
     pub fn apply_action(&self, action: BonusActionEnum) -> BonusState {
         // Already terminal -> echo back unchanged.
-        if self.final_state || self.status != BonusStatus::Ok {
+        if self.final_state || self.status != BonusStatus::OK {
             return self.clone();
         }
 
@@ -276,37 +371,37 @@ impl BonusState {
         s.from_action = Some(action);
 
         if !self.legal_actions.contains(&action) {
-            s.status = BonusStatus::IllegalAction;
+            s.status = BonusStatus::ILLEGAL_ACTION;
             s.final_state = true;
             s.legal_actions = Vec::new();
             return s;
         }
 
-        match (s.stage, action) {
-            (Stage::Preflop, BonusActionEnum::Fold) => {
+        match (s.stage, action.inner) {
+            (Stage::Preflop, BonusAction::Fold) => {
                 // Player gives up. Showdown shortcut, settle as fold.
                 s.stage = Stage::Showdown;
                 s.dealer_revealed = true;
                 settle(&mut s);
                 s.final_state = true;
             }
-            (Stage::Preflop, BonusActionEnum::Play) => {
+            (Stage::Preflop, BonusAction::Play) => {
                 s.flop_bet = 2.0 * s.ante;
                 s.stake -= s.flop_bet;
                 deal_flop(&mut s);
                 s.stage = Stage::Flop;
             }
-            (Stage::Flop, BonusActionEnum::Bet) => {
+            (Stage::Flop, BonusAction::Bet) => {
                 s.turn_bet = s.ante;
                 s.stake -= s.turn_bet;
                 deal_turn(&mut s);
                 s.stage = Stage::Turn;
             }
-            (Stage::Flop, BonusActionEnum::Check) => {
+            (Stage::Flop, BonusAction::Check) => {
                 deal_turn(&mut s);
                 s.stage = Stage::Turn;
             }
-            (Stage::Turn, BonusActionEnum::Bet) => {
+            (Stage::Turn, BonusAction::Bet) => {
                 s.river_bet = s.ante;
                 s.stake -= s.river_bet;
                 deal_river(&mut s);
@@ -315,7 +410,7 @@ impl BonusState {
                 settle(&mut s);
                 s.final_state = true;
             }
-            (Stage::Turn, BonusActionEnum::Check) => {
+            (Stage::Turn, BonusAction::Check) => {
                 deal_river(&mut s);
                 s.stage = Stage::Showdown;
                 s.dealer_revealed = true;
@@ -356,8 +451,8 @@ pub(crate) fn compute_legal_actions(s: &BonusState) -> Vec<BonusActionEnum> {
         return Vec::new();
     }
     match s.stage {
-        Stage::Preflop => vec![BonusActionEnum::Fold, BonusActionEnum::Play],
-        Stage::Flop | Stage::Turn => vec![BonusActionEnum::Check, BonusActionEnum::Bet],
+        Stage::Preflop => vec![BonusActionEnum::FOLD, BonusActionEnum::PLAY],
+        Stage::Flop | Stage::Turn => vec![BonusActionEnum::CHECK, BonusActionEnum::BET],
         Stage::River | Stage::Showdown => Vec::new(),
     }
 }
@@ -424,7 +519,7 @@ pub(crate) fn settle(s: &mut BonusState) {
     s.reward += pay_bonus(s.player_hand, s.bonus_bet);
 
     // 2. Main game.
-    if s.from_action == Some(BonusActionEnum::Fold) {
+    if s.from_action == Some(BonusActionEnum::FOLD) {
         s.reward -= s.ante;
         return;
     }
@@ -479,11 +574,11 @@ mod tests {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 42).unwrap();
         assert_eq!(s.stage, Stage::Preflop);
         assert!(!s.final_state);
-        assert_eq!(s.status, BonusStatus::Ok);
-        assert!(s.legal_actions.contains(&BonusActionEnum::Fold));
-        assert!(s.legal_actions.contains(&BonusActionEnum::Play));
-        assert!(!s.legal_actions.contains(&BonusActionEnum::Bet));
-        assert!(!s.legal_actions.contains(&BonusActionEnum::Check));
+        assert_eq!(s.status, BonusStatus::OK);
+        assert!(s.legal_actions.contains(&BonusActionEnum::FOLD));
+        assert!(s.legal_actions.contains(&BonusActionEnum::PLAY));
+        assert!(!s.legal_actions.contains(&BonusActionEnum::BET));
+        assert!(!s.legal_actions.contains(&BonusActionEnum::CHECK));
     }
 
     #[test]
@@ -514,7 +609,7 @@ mod tests {
     #[test]
     fn fold_terminates_and_loses_ante_only() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
-        let s = s.apply_action(BonusActionEnum::Fold);
+        let s = s.apply_action(BonusActionEnum::FOLD);
         assert!(s.final_state);
         assert_eq!(s.stage, Stage::Showdown);
         assert_eq!(s.reward, -10.0);
@@ -525,23 +620,23 @@ mod tests {
     fn play_advances_to_flop_and_charges_2x_ante() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
         let stake_before = s.stake;
-        let s = s.apply_action(BonusActionEnum::Play);
+        let s = s.apply_action(BonusActionEnum::PLAY);
         assert_eq!(s.stage, Stage::Flop);
         assert_eq!(s.flop_bet, 20.0);
         assert_eq!(s.public_cards.len(), 3);
         assert_eq!(s.stake, stake_before - 20.0);
-        assert!(s.legal_actions.contains(&BonusActionEnum::Check));
-        assert!(s.legal_actions.contains(&BonusActionEnum::Bet));
+        assert!(s.legal_actions.contains(&BonusActionEnum::CHECK));
+        assert!(s.legal_actions.contains(&BonusActionEnum::BET));
     }
 
     #[test]
     fn check_check_to_showdown() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
-        let s = s.apply_action(BonusActionEnum::Play);
-        let s = s.apply_action(BonusActionEnum::Check);
+        let s = s.apply_action(BonusActionEnum::PLAY);
+        let s = s.apply_action(BonusActionEnum::CHECK);
         assert_eq!(s.stage, Stage::Turn);
         assert_eq!(s.public_cards.len(), 4);
-        let s = s.apply_action(BonusActionEnum::Check);
+        let s = s.apply_action(BonusActionEnum::CHECK);
         assert_eq!(s.stage, Stage::Showdown);
         assert!(s.final_state);
         assert_eq!(s.public_cards.len(), 5);
@@ -551,13 +646,13 @@ mod tests {
     #[test]
     fn bet_bet_charges_extra_ante_each() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
-        let s = s.apply_action(BonusActionEnum::Play);
+        let s = s.apply_action(BonusActionEnum::PLAY);
         let stake_after_play = s.stake;
-        let s = s.apply_action(BonusActionEnum::Bet);
+        let s = s.apply_action(BonusActionEnum::BET);
         assert_eq!(s.turn_bet, 10.0);
         assert_eq!(s.stake, stake_after_play - 10.0);
         let stake_after_flop_bet = s.stake;
-        let s = s.apply_action(BonusActionEnum::Bet);
+        let s = s.apply_action(BonusActionEnum::BET);
         assert_eq!(s.river_bet, 10.0);
         assert_eq!(s.stake, stake_after_flop_bet - 10.0);
         assert!(s.final_state);
@@ -568,16 +663,16 @@ mod tests {
     fn illegal_action_marks_status_and_terminates() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
         // Bet is not legal in Preflop.
-        let s2 = s.apply_action(BonusActionEnum::Bet);
-        assert_eq!(s2.status, BonusStatus::IllegalAction);
+        let s2 = s.apply_action(BonusActionEnum::BET);
+        assert_eq!(s2.status, BonusStatus::ILLEGAL_ACTION);
         assert!(s2.final_state);
     }
 
     #[test]
     fn applying_action_after_terminal_is_noop() {
         let s = BonusState::from_seed(10.0, 0.0, 1000.0, 7).unwrap();
-        let folded = s.apply_action(BonusActionEnum::Fold);
-        let again = folded.apply_action(BonusActionEnum::Play);
+        let folded = s.apply_action(BonusActionEnum::FOLD);
+        let again = folded.apply_action(BonusActionEnum::PLAY);
         assert_eq!(again.reward, folded.reward);
         assert!(again.final_state);
     }
@@ -694,9 +789,9 @@ mod tests {
 
     fn play_check_check(state: BonusState) -> BonusState {
         state
-            .apply_action(BonusActionEnum::Play)
-            .apply_action(BonusActionEnum::Check)
-            .apply_action(BonusActionEnum::Check)
+            .apply_action(BonusActionEnum::PLAY)
+            .apply_action(BonusActionEnum::CHECK)
+            .apply_action(BonusActionEnum::CHECK)
     }
 
     #[test]
@@ -831,7 +926,7 @@ mod tests {
             c(CardSuit::Diamonds, CardRank::R3),
         ]);
         let s = BonusState::from_deck(10.0, 5.0, 1000.0, deck).unwrap();
-        let s = s.apply_action(BonusActionEnum::Fold);
+        let s = s.apply_action(BonusActionEnum::FOLD);
         assert!(s.final_state);
         // Lose ante (-10). Bonus pays 30 * 5 = 150.
         assert_eq!(s.reward, 140.0);
